@@ -597,6 +597,7 @@ PERFORMANCE_TESTS = $(shell ls test/performance/*.cpp)
 ERROR_TESTS = $(shell ls test/error/*.cpp)
 WARNING_TESTS = $(shell ls test/warning/*.cpp)
 OPENGL_TESTS := $(shell ls test/opengl/*.cpp)
+RS_TESTS := $(shell ls test/rs/*.cpp)
 GENERATOR_TESTS := $(shell ls test/generator/*test.cpp)
 TUTORIALS = $(filter-out %_generate.cpp, $(shell ls tutorial/*.cpp))
 
@@ -611,6 +612,7 @@ test_warnings: $(WARNING_TESTS:test/warning/%.cpp=warning_%)
 test_tutorials: $(TUTORIALS:tutorial/%.cpp=tutorial_%)
 test_valgrind: $(CORRECTNESS_TESTS:test/correctness/%.cpp=valgrind_%)
 test_opengl: $(OPENGL_TESTS:test/opengl/%.cpp=opengl_%)
+test_rs: $(RS_TESTS:test/rs/%.cpp=rs_%)
 test_generators: $(GENERATOR_TESTS:test/generator/%_aottest.cpp=generator_aot_%) $(GENERATOR_TESTS:test/generator/%_jittest.cpp=generator_jit_%)
 
 ALL_TESTS = test_internal test_correctness test_errors test_tutorials test_warnings test_generators
@@ -620,6 +622,7 @@ ALL_TESTS = test_internal test_correctness test_errors test_tutorials test_warni
 time_compilation_correctness: init_time_compilation_correctness $(CORRECTNESS_TESTS:test/correctness/%.cpp=time_compilation_test_%)
 time_compilation_performance: init_time_compilation_performance $(PERFORMANCE_TESTS:test/performance/%.cpp=time_compilation_performance_%)
 time_compilation_opengl: init_time_compilation_opengl $(OPENGL_TESTS:test/opengl/%.cpp=time_compilation_opengl_%)
+time_compilation_rs: init_time_compilation_rs $(RS_TESTS:test/rs/%.cpp=time_compilation_rs_%)
 time_compilation_generators: init_time_compilation_generator $(GENERATOR_TESTS:test/generator/%_aottest.cpp=time_compilation_generator_%)
 
 init_time_compilation_%:
@@ -653,6 +656,9 @@ $(BIN_DIR)/warning_%: test/warning/%.cpp $(BIN_DIR)/libHalide.so include/Halide.
 	$(CXX) $(TEST_CXX_FLAGS) $(OPTIMIZE) $< -Iinclude -L$(BIN_DIR) -lHalide $(LLVM_LDFLAGS) -lpthread -ldl -lz -o $@
 
 $(BIN_DIR)/opengl_%: test/opengl/%.cpp $(BIN_DIR)/libHalide.so include/Halide.h
+	$(CXX) $(TEST_CXX_FLAGS) $(OPTIMIZE) $< -Iinclude -Isrc -L$(BIN_DIR) -lHalide $(LLVM_LDFLAGS) -lpthread -ldl -lz -o $@
+
+$(BIN_DIR)/rs_%: test/rs/%.cpp $(BIN_DIR)/libHalide.so include/Halide.h
 	$(CXX) $(TEST_CXX_FLAGS) $(OPTIMIZE) $< -Iinclude -Isrc -L$(BIN_DIR) -lHalide $(LLVM_LDFLAGS) -lpthread -ldl -lz -o $@
 
 tmp/static/%/%.o: $(BIN_DIR)/static_%_generate
@@ -793,6 +799,11 @@ opengl_%: $(BIN_DIR)/opengl_%
 	cd tmp ; HL_JIT_TARGET=$(HL_JIT_TARGET) $(LD_PATH_SETUP) ../$< 2>&1
 	@-echo
 
+rs_%: HL_JIT_TARGET = host-rs
+rs_%: $(BIN_DIR)/rs_%
+	@-mkdir -p tmp
+	cd tmp ; HL_JIT_TARGET=$(HL_JIT_TARGET) $(LD_PATH_SETUP) ../$<
+	@-echo
 
 generator_%: $(BIN_DIR)/generator_%
 	@-mkdir -p tmp
@@ -816,6 +827,9 @@ time_compilation_performance_%: $(BIN_DIR)/performance_%
 
 time_compilation_opengl_%: $(BIN_DIR)/opengl_%
 	$(TIME_COMPILATION) compile_times_opengl.csv make $(@:time_compilation_opengl_%=opengl_%)
+
+time_compilation_rs_%: $(BIN_DIR)/rs_%
+	$(TIME_COMPILATION) compile_times_rs.csv make $(@:time_compilation_rs_%=rs_%)
 
 time_compilation_static_%: $(BIN_DIR)/static_%_generate
 	$(TIME_COMPILATION) compile_times_static.csv make $(@:time_compilation_static_%=tmp/static/%/%.o)

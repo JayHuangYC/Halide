@@ -337,19 +337,11 @@ llvm::DataLayout CodeGen_RS_Dev::get_data_layout() const {
 void CodeGen_RS_Dev::visit(const For *loop) {
     debug(2) << "RS: Visiting for loop, loop->name is " << loop->name << "\n";
     if (is_gpu_var(loop->name)) {
-        //        Expr simt_idx = Call::make(Int(32), loop->name,
-        //        std::vector<Expr>(), Call::Extern);
-        if (is_gpu_thread_var(loop->name)) {
-            debug(2) << "RS: ignore loop over gpu_thread_var" << loop->name
-                     << "\n";
-            // ignore thread-parallelization since it's taken care of by
-            // Renderscript.
-            loop->body.accept(this);
-        } else {
-            debug(2) << "RS: do nothing with loop over non-gpu_thread_var"
-                     << loop->name << "\n";
-            loop->body.accept(this);
-        }
+        // Whether it's thread-parallelization loop or loop over
+        // coordinate variables, collapse them going straight to the body
+        // because Renderscript takes care of setting up the loops.
+        // We just need to produce a kernel code.
+        loop->body.accept(this);
     } else {
         user_assert(loop->for_type != ForType::Parallel)
             << "Cannot use loops inside RS kernel\n";
@@ -370,54 +362,11 @@ void CodeGen_RS_Dev::visit(const Free *f) {
 
 void CodeGen_RS_Dev::visit(const Call *op) {
     if (op->call_type == Call::Intrinsic) {
-
-    // image_store(
-    //     x4("result"),
-    //     x4(result.buffer),
-    //     x4((result.s0.x.__block_id_x + result.min.0)),
-    //     x4((result.s0.y.__block_id_y + result.min.1)),
-    //     ramp(0, 1, 4),
-    //     (((
-    //         (
-    //             (
-    //                 (
-    //                     image_load(
-    //                         x4("input"),
-    //                         x4("input"),
-    //                         x4(input.buffer),
-    //                         x4((t22.s - input.min.0)),
-    //                         x4(input.extent.0),
-    //                         x4((t23.s - input.min.1)),
-    //                         x4(input.extent.1),
-    //                         ramp(0, 1, 4)
-    //                     ) 
-    //                     + image_load(
-    //                         x4("input"),
-    //                         x4("input"),
-    //                         x4(input.buffer),
-    //                         x4((t24.s - input.min.0)),
-    //                         x4(input.extent.0),
-    //                         x4((t23.s - input.min.1)),
-    //                         x4(input.extent.1),
-    //                         ramp(0, 1, 4))
-    //                 )
-    //                 + image_load(
-    //                     x4("input"),
-    //                     x4("input"),
-    //                     x4(input.buffer),
-    //                     x4((t25.s - input.min.0)),
-    //                     x4(input.extent.0),
-    //                     x4((t23.s - input.min.1)),
-    //                     x4(input.extent.1),
-    //                     ramp(0, 1, 4)
-    //                 )
-    //             )/x4(uint8(3))
-    //         )
-    //         ...
-
         if (op->name == Call::image_load) {
-            // This intrinsic takes four arguments
+            //
             // image_load(<tex name>, <buffer>, <x>, <x-extent>, <y>, <y-extent>, <c>, <c-extent>)
+            //
+            // TODO(aam): Currently only (x,y,c) three coordinate access is supported.
             internal_assert(op->args.size() == 8);
 
             // The argument to the call is either a StringImm or a broadcasted
@@ -432,7 +381,7 @@ void CodeGen_RS_Dev::visit(const Call *op) {
                 string_imm = op->args[0].as<Broadcast>()->value.as<StringImm>();
             }
 
-            // Determine the halide buffer associated with this load
+            // Determine the halide buffer associated with this load.
             string buffername = string_imm->value;
 
             internal_assert(
@@ -451,28 +400,14 @@ void CodeGen_RS_Dev::visit(const Call *op) {
                 y = b->value;
             }
 
-            // internal_assert(op->args[2].type().width == 1)
-            //     << "image_load argument 2 is not scalar";
-            // internal_assert(op->args[3].type().width == 1)
-            //     << "image_load argument 3 is not scalar";
-
-            debug(2) << "rsGetElementAt_uchar4(input, " << x << ", " << y
-                     << ")\n";
+            internal_assert(x.type().width == 1)
+                << "image_load argument 2 is not scalar";
+            internal_assert(y.type().width == 1)
+                << "image_load argument 3 is not scalar";
 
             const int index_c = 6;
             Expr c = op->args[index_c];
             // TOOD: ramp over c
-
-            llvm::Function *rsGetElementAt_uchar4 = module->getFunction(
-                "_Z21rsGetElementAt_uchar413rs_allocationjj");
-            internal_assert(rsGetElementAt_uchar4)
-                << "Cant' find _Z21rsGetElementAt_uchar413rs_allocationjj "
-                   "function";
-            llvm::Function *rsGetElementAt_uchar = module->getFunction(
-                "_Z20rsGetElementAt_uchar13rs_allocationjj");
-            internal_assert(rsGetElementAt_uchar)
-                << "Cant' find _Z20rsGetElementAt_uchar13rs_allocationjj "
-                   "function";
 
             vector<Value *> args =
                 vec(sym_get("input"), codegen(x), codegen(y));
@@ -486,23 +421,22 @@ void CodeGen_RS_Dev::visit(const Call *op) {
                 arg->getType()->dump();
                 arg->dump();
             }
-            value =
-                builder->CreateCall(op->type.width == 1 ? rsGetElementAt_uchar
-                                                        : rsGetElementAt_uchar4,
-                                    args);
+            if (op->type.width == 1) {
+                 llvm::Function *rsGetElementAt_uchar = module->getFunction(
+                    "_Z20rsGetElementAt_uchar13rs_allocationjj");
+                internal_assert(rsGetElementAt_uchar)
+                    << "Cant' find _Z20rsGetElementAt_uchar13rs_allocationjj "
+                       "function";
+                value = builder->CreateCall(rsGetElementAt_uchar, args);
+            } else {
+                llvm::Function *rsGetElementAt_uchar4 = module->getFunction(
+                    "_Z21rsGetElementAt_uchar413rs_allocationjj");
+                internal_assert(rsGetElementAt_uchar4)
+                    << "Cant' find _Z21rsGetElementAt_uchar413rs_allocationjj "
+                       "function";
+                value = builder->CreateCall(rsGetElementAt_uchar4, args);
+            }
         } else if (op->name == Call::image_store) {
-
-            llvm::Function *rsSetElementAt_uchar4 = module->getFunction(
-                "_Z21rsSetElementAt_uchar413rs_allocationDv4_hjj");
-            internal_assert(rsSetElementAt_uchar4)
-                << "Cant' find _Z21rsSetElementAt_uchar413rs_allocationDv4_hjj "
-                   "function";
-            llvm::Function *rsSetElementAt_uchar = module->getFunction(
-                "_Z20rsSetElementAt_uchar13rs_allocationhjj");
-            internal_assert(rsSetElementAt_uchar)
-                << "Cant' find _Z20rsSetElementAt_uchar13rs_allocationhjj "
-                   "function";
-
             const int index_x = 2;
             const int index_y = 3;
             const int index_c = 4;
@@ -537,10 +471,21 @@ void CodeGen_RS_Dev::visit(const Call *op) {
                 arg->dump();
             }
 
-            value =
-                builder->CreateCall(op->type.width == 1 ? rsSetElementAt_uchar
-                                                        : rsSetElementAt_uchar4,
-                                    args);
+            if (op->type.width == 1) {
+                llvm::Function *rsSetElementAt_uchar = module->getFunction(
+                    "_Z20rsSetElementAt_uchar13rs_allocationhjj");
+                internal_assert(rsSetElementAt_uchar)
+                    << "Cant' find _Z20rsSetElementAt_uchar13rs_allocationhjj "
+                   "function";
+                value = builder->CreateCall(rsSetElementAt_uchar, args);
+            } else {
+                llvm::Function *rsSetElementAt_uchar4 = module->getFunction(
+                    "_Z21rsSetElementAt_uchar413rs_allocationDv4_hjj");
+                internal_assert(rsSetElementAt_uchar4)
+                    << "Cant' find _Z21rsSetElementAt_uchar413rs_allocationDv4_hjj "
+                   "function";
+                value = builder->CreateCall(rsSetElementAt_uchar4, args);
+            }
             return;
         }
     }
@@ -550,14 +495,21 @@ string CodeGen_RS_Dev::march() const {
     return "armv7";
 }
 
-string CodeGen_RS_Dev::mcpu() const { return "none"; }
+string CodeGen_RS_Dev::mcpu() const {
+    return "none";
+}
 
-string CodeGen_RS_Dev::mattrs() const { return "linux-gnueabi"; }
+string CodeGen_RS_Dev::mattrs() const {
+    return "linux-gnueabi";
+}
 
-bool CodeGen_RS_Dev::use_soft_float_abi() const { return false; }
+bool CodeGen_RS_Dev::use_soft_float_abi() const {
+    // Taken from CodeGen_ARM::use_soft_float_abit.
+    return target.bits == 32;
+}
 
 llvm::Triple CodeGen_RS_Dev::get_target_triple() const {
-    return Triple(Triple::normalize("armv7-none-linux-gnueabi"));
+    return Triple(Triple::normalize(march() + "-" + mcpu() + "-" + mattrs()));
 }
 
 struct AndroidBitcodeWrapper {
@@ -637,46 +589,152 @@ vector<char> CodeGen_RS_Dev::compile_to_src() {
     // llvm_3_2::WriteBitcodeToFile(module, OS);
     OS.flush();
 
-    /**
-     * The minimum version which does not require translation (i.e. is already
-     * compatible with LLVM's default bitcode reader).
-     */
+    //
+    // Values below are to accomodate Android Renderscript bitcode reader.
+    //
+    // The minimum version which does not require translation (i.e. is already
+    // compatible with LLVM's default bitcode reader).
+    //
     const unsigned int kMinimumUntranslatedVersion = 21;
-
-    // BitcodeWrapper BCWrapper(str.c_str(), str.size());
 
     AndroidBitcodeWrapper wrapper;
     size_t actualWrapperLen = writeAndroidBitcodeWrapper(
         &wrapper, str.size(), kMinimumUntranslatedVersion,
         0x000076d /*BCWrapper.getCompilerVersion()*/,
         3 /*BCWrapper.getOptimizationLevel()*/);
-    if (!actualWrapperLen) {
-        debug(1) << "Couldn't produce bitcode wrapper!\n";
-        return vector<char>();
-    }
+
+    internal_assert(actualWrapperLen > 0) << "Couldn't produce bitcode wrapper.\n";
 
     size_t mTranslatedBitcodeSize = actualWrapperLen + str.size();
     char *c = new char[mTranslatedBitcodeSize];
     memcpy(c, &wrapper, actualWrapperLen);
     memcpy(c + actualWrapperLen, str.c_str(), str.size());
 
-    // string str = outs.str();
     debug(1) << "RS kernel:\n" << str.c_str() << "\n";
     vector<char> buffer(c, c + mTranslatedBitcodeSize);
+    delete[] c;
     return buffer;
 }
 
 int CodeGen_RS_Dev::native_vector_bits() const {
-    // TODO(aam): Copied from CodeGen_PTX_Dev. Does this make sense?
-    return 64;
+    // as per CodeGen_ARM.
+    return 128;
 }
 
-string CodeGen_RS_Dev::get_current_kernel_name() { return function->getName(); }
+string CodeGen_RS_Dev::get_current_kernel_name() {
+    return function->getName();
+}
 
-void CodeGen_RS_Dev::dump() { module->dump(); }
+void CodeGen_RS_Dev::dump() {
+    module->dump();
+}
 
 std::string CodeGen_RS_Dev::print_gpu_name(const std::string &name) {
     return name;
 }
+
+void CodeGen_RS_Dev::test() {
+    //
+    //  Given source
+    //
+    // const int nChannels = 4;
+    // ImageParam input8(UInt(8), 3, "input");
+    // input8.set_stride(0, nChannels)
+    //     .set_stride(1, Halide::Expr())
+    //     .set_stride(2, 1)
+    //     .set_bounds(2, 0, nChannels);  // expecting chunky image
+    // Var x, y, c;
+    // Func result("result");
+    // result(x, y, c) = input8(x, y, c);
+    // result.output_buffer()
+    //     .set_stride(0, nChannels)
+    //     .set_stride(1, Halide::Expr())
+    //     .set_stride(2, 1)
+    //     .set_bounds(2, 0, nChannels);  // expecting chunky image
+    // result.bound(c, 0, 4);
+    // result.rs(x, y, c).vectorize(c);
+    //
+
+    
+
+    //
+    //  produces IR
+    //
+    // parallel<RS> (result.s0.y.__block_id_y, 0, result.extent.1) {
+    //   parallel<RS> (result.s0.x.__block_id_x, 0, result.extent.0) {
+    //     allocate __shared[uint8 * 0]
+    //     parallel<RS> (.__thread_id_x, 0, 1) {
+    //       image_store(x4("result"), x4(result.buffer), x4((result.s0.x.__block_id_x + result.min.0)), x4((result.s0.y.__block_id_y + result.min.1)), ramp(0, 1, 4), image_load(x4("input"), x4(input.buffer), x4(((result.s0.x.__block_id_x + result.min.0) - input.min.0)), x4(input.extent.0), x4(((result.s0.y.__block_id_y + result.min.1) - input.min.1)), x4(input.extent.1), ramp(0, 1, 4), x4(4)))
+    //     }
+    //     free __shared
+    //   }
+    // }
+    //
+    //  produces LLVM assembly
+    //
+    // ; ModuleID = 'rs_dev_ll'
+    // target datalayout = "e-m:e-p:32:32-i64:64-v128:64:128-a:0:32-n32-S64"
+    // target triple = "armv7-none-linux-gnueabi"
+    // %struct.rs_allocation = type { i32* }
+    // @input.extent.0 = common global i32 0, align 4
+    // @input.extent.1 = common global i32 0, align 4
+    // @input.min.0 = common global i32 0, align 4
+    // @input.min.1 = common global i32 0, align 4
+    // @result.extent.0 = common global i32 0, align 4
+    // @result.extent.1 = common global i32 0, align 4
+    // @result.min.0 = common global i32 0, align 4
+    // @result.min.1 = common global i32 0, align 4
+    // @input = common global %struct.rs_allocation zeroinitializer, align 4
+    // @result = common global %struct.rs_allocation zeroinitializer, align 4
+    // declare <4 x i8> @_Z21rsGetElementAt_uchar413rs_allocationjj([1 x i32], i32, i32)
+    // declare void @_Z21rsSetElementAt_uchar413rs_allocationDv4_hjj([1 x i32], <4 x i8>, i32, i32)
+    // define void @kernel_result_s0_y___block_id_y(<4 x i8>, i32 %result.s0.x.__block_id_x, i32 %result.s0.y.__block_id_y) {
+    // entry:
+    //   %input.min.0 = load i32, i32* @input.min.0, align 4
+    //   %input.min.1 = load i32, i32* @input.min.1, align 4
+    //   %result.min.0 = load i32, i32* @result.min.0, align 4
+    //   %result.min.1 = load i32, i32* @result.min.1, align 4
+    //   %input = load [1 x i32], [1 x i32]* bitcast (%struct.rs_allocation* @input to [1 x i32]*), align 4
+    //   %result = load [1 x i32], [1 x i32]* bitcast (%struct.rs_allocation* @result to [1 x i32]*), align 4
+    //   %1 = add nsw i32 %result.min.0, %result.s0.x.__block_id_x
+    //   %2 = sub nsw i32 %1, %input.min.0
+    //   %3 = add nsw i32 %result.min.1, %result.s0.y.__block_id_y
+    //   %4 = sub nsw i32 %3, %input.min.1
+    //   %5 = tail call <4 x i8> @_Z21rsGetElementAt_uchar413rs_allocationjj([1 x i32] %input, i32 %2, i32 %4)
+    //   tail call void @_Z21rsSetElementAt_uchar413rs_allocationDv4_hjj([1 x i32] %result, <4 x i8> %5, i32 %1, i32 %3)
+    //   ret void
+    // }
+    // !\23rs_export_var = !{!0, !1, !2, !3, !4, !5, !6, !7, !8, !9}
+    // !\23rs_object_slots = !{!10, !11}
+    // !llvm.module.flags = !{!12, !13}
+    // !llvm.ident = !{!14}
+    // !\23pragma = !{!15, !16, !17}
+    // !\23rs_export_foreach_name = !{!18, !19}
+    // !\23rs_export_foreach = !{!20, !21}
+    // !0 = !{!"input.extent.0", !"6"}
+    // !1 = !{!"input.extent.1", !"6"}
+    // !2 = !{!"input.min.0", !"6"}
+    // !3 = !{!"input.min.1", !"6"}
+    // !4 = !{!"result.extent.0", !"6"}
+    // !5 = !{!"result.extent.1", !"6"}
+    // !6 = !{!"result.min.0", !"6"}
+    // !7 = !{!"result.min.1", !"6"}
+    // !8 = !{!"input", !"20"}
+    // !9 = !{!"result", !"20"}
+    // !10 = !{!"8"}
+    // !11 = !{!"9"}
+    // !12 = !{i32 1, !"wchar_size", i32 4}
+    // !13 = !{i32 1, !"min_enum_size", i32 4}
+    // !14 = !{!"clang version 3.6 "}
+    // !15 = !{!"version", !"1"}
+    // !16 = !{!"java_package_name", !"com.example.android.basicrenderscript"}
+    // !17 = !{!"rs_fp_relaxed", !""}
+    // !18 = !{!"root"}
+    // !19 = !{!"kernel_result_s0_y___block_id_y"}
+    // !20 = !{!"0"}
+    // !21 = !{!"57"}    
+
+}
+
 }
 }
