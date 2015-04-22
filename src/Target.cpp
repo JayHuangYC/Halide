@@ -302,6 +302,8 @@ bool Target::merge_string(const std::string &target) {
             set_features(vec(Target::FMA4, Target::SSE41, Target::AVX));
         } else if (tok == "f16c") {
             set_features(vec(Target::F16C, Target::SSE41, Target::AVX));
+        } else if (tok == "matlab") {
+            set_feature(Target::Matlab);
         } else {
             return false;
         }
@@ -361,7 +363,8 @@ std::string Target::to_string() const {
       "opencl", "cl_doubles",
       "opengl", "rs",
       "user_context",
-      "register_metadata"
+      "register_metadata",
+      "matlab"
   };
   internal_assert(sizeof(feature_names) / sizeof(feature_names[0]) == FeatureEnd);
   string result = string(arch_names[arch])
