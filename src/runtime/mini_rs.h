@@ -10,10 +10,10 @@
 // #define ALOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__);
 // #define ALOGV(...)                                                             \
 //   __android_log_print(ANDROID_LOG_VERBOSE, LOG_TAG, __VA_ARGS__);
-#define ALOGE(...) 
-#define ALOGW(...) 
-#define ALOGD(...) 
-#define ALOGV(...) 
+#define ALOGE(...)
+#define ALOGW(...)
+#define ALOGD(...)
+#define ALOGV(...)
 
 enum RSError {
   RS_SUCCESS = 0, ///< No error
@@ -881,5 +881,6 @@ struct dispatchTable {
   AllocationGetPointerFnPtr AllocationGetPointer;
 };
 
-bool loadSymbols(void *handle, dispatchTable &dispatchTab, int device_api = 0);
+// device_api set to 23 binds all functions available.
+WEAK bool loadSymbols(void *handle, dispatchTable &dispatchTab, int device_api = 23);
 

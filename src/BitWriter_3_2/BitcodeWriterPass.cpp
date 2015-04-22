@@ -28,9 +28,9 @@ namespace {
     explicit WriteBitcodePass(raw_ostream &o, bool ShouldPreserveUseListOrder)
         : ModulePass(ID), OS(o),
           ShouldPreserveUseListOrder(ShouldPreserveUseListOrder) {}
-    
+
     const char *getPassName() const { return "Bitcode Writer"; }
-    
+
     bool runOnModule(Module &M) {
       bool Changed = false;
       llvm_3_2::WriteBitcodeToFile(&M, OS, ShouldPreserveUseListOrder);

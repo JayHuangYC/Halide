@@ -64,12 +64,12 @@ CodeGen_RS_Dev::~CodeGen_RS_Dev() {
     delete context;
 }
 
-void CodeGen_RS_Dev::add_kernel(Stmt stmt, const std::string &name,
+void CodeGen_RS_Dev::add_kernel(Stmt stmt, const std::string &kernel_name,
                                 const std::vector<GPU_Argument> &args) {
     internal_assert(module != NULL);
 
-    // Use [name] as the function name.
-    debug(2) << "In CodeGen_RS_Dev::add_kernel name=" << name << "\n";
+    // Use [kernel_name] as the function name.
+    debug(2) << "In CodeGen_RS_Dev::add_kernel name=" << kernel_name << "\n";
 
     ExtractBoundsNames bounds_names;
     stmt.accept(&bounds_names);
@@ -79,7 +79,7 @@ void CodeGen_RS_Dev::add_kernel(Stmt stmt, const std::string &name,
         module->getTypeByName("struct.rs_allocation");
 
     // Put the arguments in the symbol table
-    vector<std::tuple<string, Value *> > globals_sym_names;
+    vector<std::tuple<string, Value *>> globals_sym_names;
 
     // Constant Definitions
     ConstantAggregateZero *const_empty_allocation_struct =
@@ -87,9 +87,10 @@ void CodeGen_RS_Dev::add_kernel(Stmt stmt, const std::string &name,
     ConstantInt *const_0 =
         ConstantInt::get(*context, APInt(32, StringRef("0"), 10));
 
-    auto rs_export_var = module->getOrInsertNamedMetadata("#rs_export_var");
-    auto rs_objects_slots =
-        module->getOrInsertNamedMetadata("#rs_object_slots");
+    NamedMDNode *rs_export_var = module->getOrInsertNamedMetadata(
+        "#rs_export_var");
+    NamedMDNode *rs_objects_slots = module->getOrInsertNamedMetadata(
+        "#rs_object_slots");
 
     // Now deduce the types of the arguments to our function
     vector<llvm::Type *> arg_types_1(args.size());
@@ -108,11 +109,13 @@ void CodeGen_RS_Dev::add_kernel(Stmt stmt, const std::string &name,
             gvar->setInitializer(const_0);
             globals_sym_names.push_back(std::make_tuple(arg_name, gvar));
 
+            //
+            //  "6" means integer for Renderscript.
+            //
             rs_export_var->addOperand(MDNode::get(
                 *context,
                 vec<LLVMMDNodeArgumentType>(MDString::get(*context, arg_name),
                                             MDString::get(*context, "6"))));
-
         } else {
             argument_type =
                 VectorType::get(llvm_type_of(UInt(8)), args[i].type.width);
@@ -127,6 +130,9 @@ void CodeGen_RS_Dev::add_kernel(Stmt stmt, const std::string &name,
             globals_sym_names.push_back(std::make_tuple(arg_name, gvar));
             gvar->setInitializer(const_empty_allocation_struct);
 
+            //
+            //  "20" means buffer for Renderscript.
+            //
             rs_export_var->addOperand(MDNode::get(
                 *context,
                 vec<LLVMMDNodeArgumentType>(MDString::get(*context, arg_name),
@@ -134,11 +140,9 @@ void CodeGen_RS_Dev::add_kernel(Stmt stmt, const std::string &name,
             rs_objects_slots->addOperand(
                 MDNode::get(*context, vec<LLVMMDNodeArgumentType>(MDString::get(
                                           *context, std::to_string(i)))));
-
-            // } else {
-            //     arg_types_1[i] = llvm_type_of(args[i].type);
         }
         Halide::Type type = args[i].type;
+
         debug(2) << "args[" << i << "] = {"
                  << "name=" << args[i].name
                  << " is_buffer=" << args[i].is_buffer
@@ -154,7 +158,6 @@ void CodeGen_RS_Dev::add_kernel(Stmt stmt, const std::string &name,
                                            ? "Handle"
                                            : "???") << ";bits=" << type.bits
                  << ";width=" << type.width << " llvm_type=";
-        // arg_types_1[i]->dump();
         debug(2) << "\n";
     }
 
@@ -178,12 +181,12 @@ void CodeGen_RS_Dev::add_kernel(Stmt stmt, const std::string &name,
     // false);
     FunctionType *func_t = FunctionType::get(void_t, arg_types, false);
     function = llvm::Function::Create(func_t, llvm::Function::ExternalLinkage,
-                                      name, module);
+                                      kernel_name, module);
 
     vector<string> arg_sym_names;
 
     // Add kernel function's parameters to the scope.
-    auto input_arg = function->arg_begin();
+    llvm::Function::arg_iterator input_arg = function->arg_begin();
     input_arg++;  // skip in buffer
     for (int i = 0; i < 4; i++, input_arg++) {
         string bounds_name = bounds_names.names[i];
@@ -192,17 +195,19 @@ void CodeGen_RS_Dev::add_kernel(Stmt stmt, const std::string &name,
             sym_push(bounds_name, input_arg);
             debug(2) << "  adding kernel function parameter " << bounds_name
                      << " with type ";
-            input_arg->getType()->dump();
+            if (debug::debug_level >= 2) {
+                input_arg->getType()->dump();
+            }
             arg_sym_names.push_back(bounds_name);
         }
     }
 
     // Mark the buffer args as no alias
-    // for (size_t i = 0; i < args.size(); i++) {
-    //     if (args[i].is_buffer) {
-    //         function->setDoesNotAlias(i + 1);
-    //     }
-    // }
+    for (size_t i = 0; i < args.size(); i++) {
+        if (args[i].is_buffer) {
+            function->setDoesNotAlias(i + 1);
+        }
+    }
 
     // Make the initial basic block
     entry_block = BasicBlock::Create(*context, "entry", function);
@@ -221,15 +226,16 @@ void CodeGen_RS_Dev::add_kernel(Stmt stmt, const std::string &name,
         string name = std::get<0>(name_and_value);
         debug(2) << "Pushing global symbol " << name << " into sym table\n";
 
+        // Buffer symbols are bit-casted to rs_allocation*.
         Value *value = std::get<1>(name_and_value);
-
-        if (name.compare("input") == 0 || name.compare("result") == 0) {
-            //   %9 = load [1 x i32]* bitcast (%struct.rs_allocation* @alloc_in
-            //   to [1 x i32]*), align 4
-            value = builder->CreateBitCast(
-                value,
-                PointerType::get(
-                    ArrayType::get(IntegerType::get(*context, 32), 1), 0));
+        llvm::PointerType *p = llvm::cast<llvm::PointerType>(value->getType());
+        if (p != NULL) {
+            if (p->getElementType() == StructTy_struct_rs_allocation) {
+                value = builder->CreateBitCast(
+                    value,
+                    PointerType::get(
+                        ArrayType::get(IntegerType::get(*context, 32), 1), 0));
+            }
         }
 
         value = builder->CreateAlignedLoad(value, 4 /*alignment*/);
@@ -247,49 +253,17 @@ void CodeGen_RS_Dev::add_kernel(Stmt stmt, const std::string &name,
     builder->SetInsertPoint(entry_block);
     builder->CreateBr(body_block);
 
-    auto meta_llvm_module_flags =
-        module->getOrInsertNamedMetadata("llvm.module.flags");
-    meta_llvm_module_flags->addOperand(MDNode::get(
-        *context, vec<LLVMMDNodeArgumentType>(
-                      value_as_metadata_type(ConstantInt::get(i32, 1)),
-                      MDString::get(*context, "wchar_size"),
-                      value_as_metadata_type(ConstantInt::get(i32, 4)))));
-    meta_llvm_module_flags->addOperand(MDNode::get(
-        *context, vec<LLVMMDNodeArgumentType>(
-                      value_as_metadata_type(ConstantInt::get(i32, 1)),
-                      MDString::get(*context, "min_enum_size"),
-                      value_as_metadata_type(ConstantInt::get(i32, 4)))));
-
-    module->getOrInsertNamedMetadata("llvm.ident")
-        ->addOperand(
-            MDNode::get(*context, vec<LLVMMDNodeArgumentType>(MDString::get(
-                                      *context, "clang version 3.6 "))));
-
-    auto meta_pragma = module->getOrInsertNamedMetadata("#pragma");
-    meta_pragma->addOperand(MDNode::get(
-        *context,
-        vec<LLVMMDNodeArgumentType>(MDString::get(*context, "version"),
-                                    MDString::get(*context, "1"))));
-    meta_pragma->addOperand(MDNode::get(
-        *context,
-        vec<LLVMMDNodeArgumentType>(
-            MDString::get(*context, "java_package_name"),
-            MDString::get(*context, "com.example.android.basicrenderscript"))));
-    meta_pragma->addOperand(MDNode::get(
-        *context,
-        vec<LLVMMDNodeArgumentType>(MDString::get(*context, "rs_fp_relaxed"),
-                                    MDString::get(*context, ""))));
-
-    auto rs_export_foreach_name =
+    // Add Renderscript-standard set of metadata.
+    NamedMDNode *rs_export_foreach_name =
         module->getOrInsertNamedMetadata("#rs_export_foreach_name");
     rs_export_foreach_name->addOperand(MDNode::get(
         *context,
         vec<LLVMMDNodeArgumentType>(MDString::get(*context, "root"))));
     rs_export_foreach_name->addOperand(MDNode::get(
         *context, vec<LLVMMDNodeArgumentType>(MDString::get(
-                      *context, "kernel_result_s0_y___block_id_y"))));
+                      *context, kernel_name))));
 
-    auto rs_export_foreach =
+    NamedMDNode *rs_export_foreach =
         module->getOrInsertNamedMetadata("#rs_export_foreach");
     rs_export_foreach->addOperand(MDNode::get(
         *context, vec<LLVMMDNodeArgumentType>(MDString::get(*context, "0"))));
@@ -313,9 +287,6 @@ void CodeGen_RS_Dev::add_kernel(Stmt stmt, const std::string &name,
 void CodeGen_RS_Dev::init_module() {
     debug(2) << "CodeGen_RS_Dev::init_module\n";
     init_context();
-    debug(2) << "CodeGen_RS_Dev::module is " << module << "\n";
-
-//    module = new llvm::Module("rs_module", *context);
 #ifdef WITH_RS
     delete module;
     module = get_initial_module_for_rs_device(target, context);
@@ -335,7 +306,8 @@ llvm::DataLayout CodeGen_RS_Dev::get_data_layout() const {
 // generated RenderScript code.
 //
 void CodeGen_RS_Dev::visit(const For *loop) {
-    debug(2) << "RS: Visiting for loop, loop->name is " << loop->name << "\n";
+    debug(2) << "RS: Visiting for loop, loop->name is " << loop->name
+             << " is_gpu_var? " << is_gpu_var(loop->name) << "\n";
     if (is_gpu_var(loop->name)) {
         // Whether it's thread-parallelization loop or loop over
         // coordinate variables, collapse them going straight to the body
@@ -347,7 +319,6 @@ void CodeGen_RS_Dev::visit(const For *loop) {
             << "Cannot use loops inside RS kernel\n";
         CodeGen_LLVM::visit(loop);
     }
-    debug(2) << "RS: Done with for loop\n";
 }
 
 void CodeGen_RS_Dev::visit(const Allocate *alloc) {
@@ -360,135 +331,95 @@ void CodeGen_RS_Dev::visit(const Free *f) {
     debug(2) << "RS: Free on device\n";
 }
 
+llvm::Function *CodeGen_RS_Dev::fetch_GetElement_func(int width) {
+    std::string func_name = width == 1
+                            ? "_Z20rsGetElementAt_uchar13rs_allocationjjj"
+                            : "_Z21rsGetElementAt_uchar413rs_allocationjj";
+    llvm::Function *func = module->getFunction(func_name);
+    internal_assert(func) << "Cant' find " << func_name << "function";
+    return func;
+}
+
+llvm::Function *CodeGen_RS_Dev::fetch_SetElement_func(int width) {
+    std::string func_name = width == 1
+                            ? "_Z20rsSetElementAt_uchar13rs_allocationhjjj"
+                            : "_Z21rsSetElementAt_uchar413rs_allocationDv4_hjj";
+    llvm::Function *func = module->getFunction(func_name);
+    internal_assert(func) << "Cant' find " << func_name << "function";
+    return func;
+}
+
+vector<Value *> CodeGen_RS_Dev::add_x_y_c_args(Expr name, Expr x, Expr y, Expr c) {
+    vector<Value *> args;
+    const Broadcast *b_name = name.as<Broadcast>();
+    const Broadcast *b_x = x.as<Broadcast>();
+    const Broadcast *b_y = y.as<Broadcast>();
+    const Ramp *ramp_c = c.as<Ramp>();
+    if (b_name != NULL && b_x != NULL && b_y != NULL && ramp_c != NULL) {
+        // vectorized over c, use x and y to retrieve 4-byte RGBA chunk.
+        const IntImm *stride = ramp_c->stride.IRHandle::as<IntImm>();
+        user_assert(stride->value == 1 && ramp_c->width == 4)
+            << "Only vectorized RGBA format is supported at present.\n";
+        user_assert(b_x->value.type().width == 1)
+            << "Image_load/store x coordinate is not scalar.\n";
+        user_assert(b_y->value.type().width == 1)
+            << "Image_load/store y coordinate is not scalar.\n";
+        args.push_back(sym_get(b_name->value.as<StringImm>()->value));
+        args.push_back(codegen(b_x->value));
+        args.push_back(codegen(b_y->value));
+    } else {
+        // Use all three coordinates to retrieve single byte.
+        user_assert(b_name == NULL && b_x == NULL && b_y == NULL && ramp_c == NULL);
+        args.push_back(sym_get(name.as<StringImm>()->value));
+        args.push_back(codegen(x));
+        args.push_back(codegen(y));
+        args.push_back(codegen(c));
+    }
+    return args;
+}
+
 void CodeGen_RS_Dev::visit(const Call *op) {
     if (op->call_type == Call::Intrinsic) {
-        if (op->name == Call::image_load) {
+        if (op->name == Call::image_load || op->name == Call::image_store) {
             //
-            // image_load(<tex name>, <buffer>, <x>, <x-extent>, <y>, <y-extent>, <c>, <c-extent>)
+            // image_load(<image name>, <buffer>, <x>, <x-extent>, <y>, <y-extent>, <c>, <c-extent>)
+            // or
+            // image_store(<image name>, <buffer>, <x>, <y>, <c>, <value>)
             //
-            // TODO(aam): Currently only (x,y,c) three coordinate access is supported.
-            internal_assert(op->args.size() == 8);
+            const int index_name = 0;
+            const int index_x = op->name == Call::image_load ? 2: 2;
+            const int index_y = op->name == Call::image_load? 4: 3;
+            const int index_c = op->name == Call::image_load? 6: 4;
+            vector<Value *> args = add_x_y_c_args(op->args[index_name],
+                                                  op->args[index_x],
+                                                  op->args[index_y],
+                                                  op->args[index_c]);
 
-            // The argument to the call is either a StringImm or a broadcasted
-            // StringImm if this is part of a vectorized expression
-            internal_assert(
-                op->args[0].as<StringImm>() ||
-                (op->args[0].as<Broadcast>() &&
-                 op->args[0].as<Broadcast>()->value.as<StringImm>()));
-
-            const StringImm *string_imm = op->args[0].as<StringImm>();
-            if (!string_imm) {
-                string_imm = op->args[0].as<Broadcast>()->value.as<StringImm>();
+            if (op->name == Call::image_store) {
+                args.insert(args.begin()+1, codegen(op->args[5]));
             }
-
-            // Determine the halide buffer associated with this load.
-            string buffername = string_imm->value;
-
-            internal_assert(
-                (op->type.code == Type::UInt || op->type.code == Type::Float) &&
-                (op->type.width >= 1 && op->type.width <= 4));
-
-            const int index_x = 2;
-            Expr x = op->args[index_x];
-            if (const Broadcast *b = x.as<Broadcast>()) {
-                x = b->value;
-            }
-            debug(2) << "x=" << x << "\n";
-            const int index_y = 4;
-            Expr y = op->args[index_y];
-            if (const Broadcast *b = y.as<Broadcast>()) {
-                y = b->value;
-            }
-
-            internal_assert(x.type().width == 1)
-                << "image_load argument 2 is not scalar";
-            internal_assert(y.type().width == 1)
-                << "image_load argument 3 is not scalar";
-
-            const int index_c = 6;
-            Expr c = op->args[index_c];
-            // TOOD: ramp over c
-
-            vector<Value *> args =
-                vec(sym_get("input"), codegen(x), codegen(y));
 
             debug(2) << "Generating " << op->type.width
-                     << "byte-wide GetElement call with " << args.size()
+                     << "byte-wide call with " << args.size()
                      << " args:\n";
-            int i = 1;
-            for (Value *arg : args) {
-                debug(2) << " #" << i++ << ":";
-                arg->getType()->dump();
-                arg->dump();
-            }
-            if (op->type.width == 1) {
-                 llvm::Function *rsGetElementAt_uchar = module->getFunction(
-                    "_Z20rsGetElementAt_uchar13rs_allocationjj");
-                internal_assert(rsGetElementAt_uchar)
-                    << "Cant' find _Z20rsGetElementAt_uchar13rs_allocationjj "
-                       "function";
-                value = builder->CreateCall(rsGetElementAt_uchar, args);
-            } else {
-                llvm::Function *rsGetElementAt_uchar4 = module->getFunction(
-                    "_Z21rsGetElementAt_uchar413rs_allocationjj");
-                internal_assert(rsGetElementAt_uchar4)
-                    << "Cant' find _Z21rsGetElementAt_uchar413rs_allocationjj "
-                       "function";
-                value = builder->CreateCall(rsGetElementAt_uchar4, args);
-            }
-        } else if (op->name == Call::image_store) {
-            const int index_x = 2;
-            const int index_y = 3;
-            const int index_c = 4;
-            debug(2) << "SetElement coordinates x:" << op->args[index_x]
-                     << " y:" << op->args[index_y]
-                     << " c:" << op->args[index_c]
-                     << "\n";
-            Expr x = op->args[index_x];
-            if (const Broadcast *b = x.as<Broadcast>()) {
-                x = b->value;
-            }
-            debug(2) << "x=" << x << "\n";
-            Expr y = op->args[index_y];
-            if (const Broadcast *b = y.as<Broadcast>()) {
-                y = b->value;
-            }
-            debug(2) << "y=" << y << "\n";
-            Expr c = op->args[index_c];
-            // TOOD: ramp over c
-            Expr set_value = op->args[5];
-
-            vector<Value *> args = vec(sym_get("result"), codegen(set_value),
-                                       codegen(x), codegen(y));
-
-            debug(2) << "Generating " << op->type.width
-                     << "byte-wide SetElement call with " << args.size()
-                     << " args:\n";
-            int i = 1;
-            for (Value *arg : args) {
-                debug(2) << " #" << i++ << ":";
-                arg->getType()->dump();
-                arg->dump();
+            if (debug::debug_level >= 2) {
+                int i = 1;
+                for (Value *arg : args) {
+                    debug(2) << " #" << i++ << ":";
+                    arg->getType()->dump();
+                    arg->dump();
+                }
             }
 
-            if (op->type.width == 1) {
-                llvm::Function *rsSetElementAt_uchar = module->getFunction(
-                    "_Z20rsSetElementAt_uchar13rs_allocationhjj");
-                internal_assert(rsSetElementAt_uchar)
-                    << "Cant' find _Z20rsSetElementAt_uchar13rs_allocationhjj "
-                   "function";
-                value = builder->CreateCall(rsSetElementAt_uchar, args);
-            } else {
-                llvm::Function *rsSetElementAt_uchar4 = module->getFunction(
-                    "_Z21rsSetElementAt_uchar413rs_allocationDv4_hjj");
-                internal_assert(rsSetElementAt_uchar4)
-                    << "Cant' find _Z21rsSetElementAt_uchar413rs_allocationDv4_hjj "
-                   "function";
-                value = builder->CreateCall(rsSetElementAt_uchar4, args);
-            }
+            llvm::Function *func =
+                op->name == Call::image_load
+                ? fetch_GetElement_func(op->type.width)
+                : fetch_SetElement_func(op->type.width);
+            value = builder->CreateCall(func, args);
             return;
         }
     }
+    CodeGen_LLVM::visit(op);
 }
 
 string CodeGen_RS_Dev::march() const {
@@ -581,8 +512,10 @@ vector<char> CodeGen_RS_Dev::compile_to_src() {
     // Generic llvm optimizations on the module.
     optimize_module();
 
-    debug(1) << "CodeGen_RS_Dev::compile_to_src resultant module:\n";
-    module->dump();
+    debug(2) << "CodeGen_RS_Dev::compile_to_src resultant module:\n";
+    if (debug::debug_level >= 2) {
+        module->dump();
+    }
 
     std::string str;
     llvm::raw_string_ostream OS(str);
@@ -610,7 +543,7 @@ vector<char> CodeGen_RS_Dev::compile_to_src() {
     memcpy(c, &wrapper, actualWrapperLen);
     memcpy(c + actualWrapperLen, str.c_str(), str.size());
 
-    debug(1) << "RS kernel:\n" << str.c_str() << "\n";
+    debug(1) << "RS kernel:\n" << str.size() << " bytes\n";
     vector<char> buffer(c, c + mTranslatedBitcodeSize);
     delete[] c;
     return buffer;
@@ -632,109 +565,5 @@ void CodeGen_RS_Dev::dump() {
 std::string CodeGen_RS_Dev::print_gpu_name(const std::string &name) {
     return name;
 }
-
-void CodeGen_RS_Dev::test() {
-    //
-    //  Given source
-    //
-    // const int nChannels = 4;
-    // ImageParam input8(UInt(8), 3, "input");
-    // input8.set_stride(0, nChannels)
-    //     .set_stride(1, Halide::Expr())
-    //     .set_stride(2, 1)
-    //     .set_bounds(2, 0, nChannels);  // expecting chunky image
-    // Var x, y, c;
-    // Func result("result");
-    // result(x, y, c) = input8(x, y, c);
-    // result.output_buffer()
-    //     .set_stride(0, nChannels)
-    //     .set_stride(1, Halide::Expr())
-    //     .set_stride(2, 1)
-    //     .set_bounds(2, 0, nChannels);  // expecting chunky image
-    // result.bound(c, 0, 4);
-    // result.rs(x, y, c).vectorize(c);
-    //
-
-    
-
-    //
-    //  produces IR
-    //
-    // parallel<RS> (result.s0.y.__block_id_y, 0, result.extent.1) {
-    //   parallel<RS> (result.s0.x.__block_id_x, 0, result.extent.0) {
-    //     allocate __shared[uint8 * 0]
-    //     parallel<RS> (.__thread_id_x, 0, 1) {
-    //       image_store(x4("result"), x4(result.buffer), x4((result.s0.x.__block_id_x + result.min.0)), x4((result.s0.y.__block_id_y + result.min.1)), ramp(0, 1, 4), image_load(x4("input"), x4(input.buffer), x4(((result.s0.x.__block_id_x + result.min.0) - input.min.0)), x4(input.extent.0), x4(((result.s0.y.__block_id_y + result.min.1) - input.min.1)), x4(input.extent.1), ramp(0, 1, 4), x4(4)))
-    //     }
-    //     free __shared
-    //   }
-    // }
-    //
-    //  produces LLVM assembly
-    //
-    // ; ModuleID = 'rs_dev_ll'
-    // target datalayout = "e-m:e-p:32:32-i64:64-v128:64:128-a:0:32-n32-S64"
-    // target triple = "armv7-none-linux-gnueabi"
-    // %struct.rs_allocation = type { i32* }
-    // @input.extent.0 = common global i32 0, align 4
-    // @input.extent.1 = common global i32 0, align 4
-    // @input.min.0 = common global i32 0, align 4
-    // @input.min.1 = common global i32 0, align 4
-    // @result.extent.0 = common global i32 0, align 4
-    // @result.extent.1 = common global i32 0, align 4
-    // @result.min.0 = common global i32 0, align 4
-    // @result.min.1 = common global i32 0, align 4
-    // @input = common global %struct.rs_allocation zeroinitializer, align 4
-    // @result = common global %struct.rs_allocation zeroinitializer, align 4
-    // declare <4 x i8> @_Z21rsGetElementAt_uchar413rs_allocationjj([1 x i32], i32, i32)
-    // declare void @_Z21rsSetElementAt_uchar413rs_allocationDv4_hjj([1 x i32], <4 x i8>, i32, i32)
-    // define void @kernel_result_s0_y___block_id_y(<4 x i8>, i32 %result.s0.x.__block_id_x, i32 %result.s0.y.__block_id_y) {
-    // entry:
-    //   %input.min.0 = load i32, i32* @input.min.0, align 4
-    //   %input.min.1 = load i32, i32* @input.min.1, align 4
-    //   %result.min.0 = load i32, i32* @result.min.0, align 4
-    //   %result.min.1 = load i32, i32* @result.min.1, align 4
-    //   %input = load [1 x i32], [1 x i32]* bitcast (%struct.rs_allocation* @input to [1 x i32]*), align 4
-    //   %result = load [1 x i32], [1 x i32]* bitcast (%struct.rs_allocation* @result to [1 x i32]*), align 4
-    //   %1 = add nsw i32 %result.min.0, %result.s0.x.__block_id_x
-    //   %2 = sub nsw i32 %1, %input.min.0
-    //   %3 = add nsw i32 %result.min.1, %result.s0.y.__block_id_y
-    //   %4 = sub nsw i32 %3, %input.min.1
-    //   %5 = tail call <4 x i8> @_Z21rsGetElementAt_uchar413rs_allocationjj([1 x i32] %input, i32 %2, i32 %4)
-    //   tail call void @_Z21rsSetElementAt_uchar413rs_allocationDv4_hjj([1 x i32] %result, <4 x i8> %5, i32 %1, i32 %3)
-    //   ret void
-    // }
-    // !\23rs_export_var = !{!0, !1, !2, !3, !4, !5, !6, !7, !8, !9}
-    // !\23rs_object_slots = !{!10, !11}
-    // !llvm.module.flags = !{!12, !13}
-    // !llvm.ident = !{!14}
-    // !\23pragma = !{!15, !16, !17}
-    // !\23rs_export_foreach_name = !{!18, !19}
-    // !\23rs_export_foreach = !{!20, !21}
-    // !0 = !{!"input.extent.0", !"6"}
-    // !1 = !{!"input.extent.1", !"6"}
-    // !2 = !{!"input.min.0", !"6"}
-    // !3 = !{!"input.min.1", !"6"}
-    // !4 = !{!"result.extent.0", !"6"}
-    // !5 = !{!"result.extent.1", !"6"}
-    // !6 = !{!"result.min.0", !"6"}
-    // !7 = !{!"result.min.1", !"6"}
-    // !8 = !{!"input", !"20"}
-    // !9 = !{!"result", !"20"}
-    // !10 = !{!"8"}
-    // !11 = !{!"9"}
-    // !12 = !{i32 1, !"wchar_size", i32 4}
-    // !13 = !{i32 1, !"min_enum_size", i32 4}
-    // !14 = !{!"clang version 3.6 "}
-    // !15 = !{!"version", !"1"}
-    // !16 = !{!"java_package_name", !"com.example.android.basicrenderscript"}
-    // !17 = !{!"rs_fp_relaxed", !""}
-    // !18 = !{!"root"}
-    // !19 = !{!"kernel_result_s0_y___block_id_y"}
-    // !20 = !{!"0"}
-    // !21 = !{!"57"}    
-
-}
-
 }
 }

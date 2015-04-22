@@ -1144,13 +1144,17 @@ static void WriteInstruction(const Instruction &I, unsigned InstID,
     break;
 
   case Instruction::GetElementPtr:
+#if LLVM_VERSION < 37
+    Code = bitc::FUNC_CODE_INST_GEP;
+#else
     Code = bitc::FUNC_CODE_INST_GEP_OLD;
+#endif
     if (cast<GEPOperator>(&I)->isInBounds())
-      #if LLVM_VERSION < 37
+#if LLVM_VERSION < 37
       Code = bitc::FUNC_CODE_INST_INBOUNDS_GEP;
-      #else
+#else
       Code = bitc::FUNC_CODE_INST_INBOUNDS_GEP_OLD;
-      #endif
+#endif
     for (unsigned i = 0, e = I.getNumOperands(); i != e; ++i)
       PushValueAndType(I.getOperand(i), InstID, Vals, VE);
     break;

@@ -74,6 +74,10 @@ protected:
     /** Map from simt variable names (e.g. foo.__block_id_x) to the coresponding
      * parameter name. */
     std::string params_mapping(const std::string &name);
+
+    llvm::Function *fetch_GetElement_func(int width);
+    llvm::Function *fetch_SetElement_func(int width);
+    std::vector<llvm::Value *> add_x_y_c_args(Expr name, Expr x, Expr y, Expr c);
 };
 }
 }

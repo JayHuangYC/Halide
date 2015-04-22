@@ -1078,14 +1078,11 @@ Func &Func::image(Var x, Var y, Var c, DeviceAPI device_api) {
     }
     user_assert(constant_bounds)
         << "The color channel for image loops must have constant bounds, e.g., .bound(c, 0, 3).\n";
-    if (device_api != DeviceAPI::RS) {
-        vectorize(c);
-    }
     return *this;
 }
 
 Func &Func::glsl(Var x, Var y, Var c) {
-    return image(x, y, c, DeviceAPI::GLSL);
+    return image(x, y, c, DeviceAPI::GLSL).vectorize(c);
 }
 
 Func &Func::rs(Var x, Var y, Var c) {

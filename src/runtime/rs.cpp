@@ -131,7 +131,7 @@ public:
     ~Context() { halide_rs_release_context(user_context); }
 };
 
-dispatchTable *Context::dispatch;
+WEAK dispatchTable *Context::dispatch;
 
 // Structure to hold the state of a module attached to the context.
 // Also used as a linked-list to keep track of all the different
@@ -806,6 +806,12 @@ WEAK size_t buf_size(void *user_context, buffer_t *buf) {
     return size;
 }
 
+namespace {
+WEAK bool is_interleaved_rgba_buffer_t(buffer_t *buf) {
+    return (buf->stride[2] == 1 && buf->extent[2] == 4);
+}
+}
+
 WEAK int halide_rs_device_malloc(void *user_context, buffer_t *buf) {
     debug(user_context) << "RS: halide_rs_device_malloc (user_context: "
                         << user_context << ", buf: " << buf << ")\n";
@@ -827,7 +833,9 @@ WEAK int halide_rs_device_malloc(void *user_context, buffer_t *buf) {
     halide_assert(user_context, buf->stride[0] >= 0 && buf->stride[1] >= 0 &&
                                     buf->stride[2] >= 0 && buf->stride[3] >= 0);
 
-    debug(user_context) << "    allocating buffer of " << (int64_t)size << " bytes, "
+    debug(user_context) << "    allocating "
+                        << (is_interleaved_rgba_buffer_t(buf)? "interleaved": "plain")
+                        << " buffer of " << (int64_t)size << " bytes, "
                         << "extents: " << buf->extent[0] << "x"
                         << buf->extent[1] << "x" << buf->extent[2] << "x"
                         << buf->extent[3] << " "
@@ -841,12 +849,19 @@ WEAK int halide_rs_device_malloc(void *user_context, buffer_t *buf) {
 #endif
 
     void *typeID = NULL;
-    if (buf->extent[2] == 4) {
+    //
+    //  Support two types of buffers:
+    //  - 2-dimension interleaved, where every element is 4-byte wide(RGBA).
+    //    Assumption is that Halide schedule for this buffer is vectorized along that 3-rd dimension(c).
+    //  - 3-dimension one-byte element.
+    //    Assumption is that there is no vectorization in Halide schedule for this data type.
+    //
+    if (is_interleaved_rgba_buffer_t(buf)) {
         //
         // 4-byte type:
         //
         void *elementID_RGBA_8888 = Context::dispatch->ElementCreate(
-            ctx.mContext, RS_TYPE_UNSIGNED_8, RS_KIND_PIXEL_RGBA, true,  // RGBA
+            ctx.mContext, RS_TYPE_UNSIGNED_8, RS_KIND_PIXEL_RGBA, true, 
             4 /*size*/);  // 4 for uchar4
         typeID = Context::dispatch->TypeCreate(
             ctx.mContext, elementID_RGBA_8888, buf->extent[0], buf->extent[1],
@@ -855,13 +870,11 @@ WEAK int halide_rs_device_malloc(void *user_context, buffer_t *buf) {
             false /*mDimFaces*/, 0);
     } else {
         void *elementID_RGB_8 = Context::dispatch->ElementCreate(
-            ctx.mContext, RS_TYPE_UNSIGNED_8, RS_KIND_PIXEL_A, true,  // RGBA
+            ctx.mContext, RS_TYPE_UNSIGNED_8, RS_KIND_PIXEL_A, true,
             1 /*size*/);
-        debug(user_context) << "Created element RGB_8 " << elementID_RGB_8
-                            << "\n";
         typeID = Context::dispatch->TypeCreate(ctx.mContext, elementID_RGB_8,
                                                buf->extent[0], buf->extent[1],
-                                               0, false
+                                               buf->extent[2], false
                                                /*mDimMipmaps*/,
                                                false /*mDimFaces*/, 0);
     }
@@ -894,7 +907,9 @@ WEAK int halide_rs_device_malloc(void *user_context, buffer_t *buf) {
 
 WEAK int halide_rs_copy_to_device(void *user_context, buffer_t *buf) {
     debug(user_context) << "RS: halide_rs_copy_to_device (user_context: "
-                        << user_context << ", buf: " << buf << ")\n";
+                        << user_context << ", "
+                        << (is_interleaved_rgba_buffer_t(buf)? "interleaved": "plain")
+                        << " buf: " << buf << ")\n";
 
     Context ctx(user_context);
     if (ctx.error != RS_SUCCESS) {
@@ -907,18 +922,21 @@ WEAK int halide_rs_copy_to_device(void *user_context, buffer_t *buf) {
 
     halide_assert(user_context, buf->host && buf->dev);
 
-    Context::dispatch->Allocation2DData(
-        ctx.mContext, (void *)halide_get_device_handle(buf->dev), 0 /*xoff*/,
-        0 /*yoff*/, 0 /*mSelectedLOD*/, RS_ALLOCATION_CUBEMAP_FACE_POSITIVE_X,
-        buf->extent[0] /*w*/, buf->extent[1] /*h*/, buf->host,
-        buf->extent[0] * buf->extent[1] * buf->extent[2] * buf->elem_size,
-        buf->extent[0] * buf->extent[2]);
-    // Context::dispatch->Allocation3DData(
-    //     ctx.mContext, (void *)halide_get_device_handle(buf->dev), 0 /*xoff*/,
-    //     0 /*yoff*/, 0 /*zoff*/, 0 /*mSelectedLOD*/, buf->extent[0] w,
-    //     buf->extent[1] /*h*/, buf->extent[2] /*d*/, buf->host,
-    //     buf->extent[0] * buf->extent[1] * buf->extent[2] * buf->elem_size,
-    //     buf->extent[0] * buf->elem_size);
+    if (is_interleaved_rgba_buffer_t(buf)) {
+        Context::dispatch->Allocation2DData(
+            ctx.mContext, (void *)halide_get_device_handle(buf->dev), 0 /*xoff*/,
+            0 /*yoff*/, 0 /*mSelectedLOD*/, RS_ALLOCATION_CUBEMAP_FACE_POSITIVE_X,
+            buf->extent[0] /*w*/, buf->extent[1] /*h*/, buf->host,
+            buf->extent[0] * buf->extent[1] * buf->extent[2] * buf->elem_size,
+            buf->extent[0] * buf->extent[2]);
+    } else {
+        Context::dispatch->Allocation3DData(
+            ctx.mContext, (void *)halide_get_device_handle(buf->dev), 0 /*xoff*/,
+            0 /*yoff*/, 0 /*zoff*/, 0 /*mSelectedLOD*/, buf->extent[0] /* w */,
+            buf->extent[1] /*h*/, buf->extent[2] /*d*/, buf->host,
+            buf->extent[0] * buf->extent[1] * buf->extent[2] * buf->elem_size,
+            buf->extent[0] * buf->elem_size);
+    }
 
     debug(user_context) << "RS: copied to device buf->dev="
                         << ((void *)halide_get_device_handle(buf->dev)) << " "
@@ -937,8 +955,10 @@ WEAK int halide_rs_copy_to_device(void *user_context, buffer_t *buf) {
 }
 
 WEAK int halide_rs_copy_to_host(void *user_context, buffer_t *buf) {
-    debug(user_context) << "RS: halide_copy_to_host (user_context: "
-                        << user_context << ", buf: " << buf << " interface: "
+    debug(user_context) << "RS: halide_copy_to_host user_context: "
+                        << user_context << ", "
+                        << (is_interleaved_rgba_buffer_t(buf)? "interleaved": "plain")
+                        << " buf: " << buf << " interface: "
                         << halide_get_device_interface(buf->dev) << " dev_buf: "
                         << (void *)halide_get_device_handle(buf->dev) << ")\n";
 
@@ -953,7 +973,7 @@ WEAK int halide_rs_copy_to_host(void *user_context, buffer_t *buf) {
 
     halide_assert(user_context, buf->host && buf->dev);
 
-    debug(user_context) << "RS: trying to copy from device buf->dev="
+    debug(user_context) << "RS: trying to copy from device buf->dev = "
                         << ((void *)halide_get_device_handle(buf->dev)) << " "
                         << buf->extent[0] << "x" << buf->extent[1] << "x"
                         << buf->extent[2] << "*" << buf->elem_size
@@ -967,20 +987,46 @@ WEAK int halide_rs_copy_to_host(void *user_context, buffer_t *buf) {
 
     Context::dispatch->ContextFinish(ctx.mContext);
 
-    Context::dispatch->AllocationSyncAll(
-        ctx.mContext, (void *)halide_get_device_handle(buf->dev),
-        RS_ALLOCATION_USAGE_SCRIPT);
-
-    Context::dispatch->Allocation2DRead(
-        ctx.mContext, (void *)halide_get_device_handle(buf->dev), 0 /*xoff*/,
-        0 /*yoff*/, 0 /*mSelectedLOD*/, RS_ALLOCATION_CUBEMAP_FACE_POSITIVE_X,
-        buf->extent[0] /*w*/, buf->extent[1] /*h*/, buf->host,
-        buf->extent[0] * buf->extent[1] * buf->extent[2] * buf->elem_size,
-        buf->extent[0] * buf->extent[2]);
+    debug(user_context) << "ContextFinish done\n";
 
     Context::dispatch->AllocationSyncAll(
         ctx.mContext, (void *)halide_get_device_handle(buf->dev),
         RS_ALLOCATION_USAGE_SCRIPT);
+
+    debug(user_context) << "AllocationSyncAll done\n";
+
+    if (is_interleaved_rgba_buffer_t(buf)) {
+        Context::dispatch->Allocation2DRead(
+            ctx.mContext, (void *)halide_get_device_handle(buf->dev), 0 /*xoff*/,
+            0 /*yoff*/, 0 /*mSelectedLOD*/, RS_ALLOCATION_CUBEMAP_FACE_POSITIVE_X,
+            buf->extent[0] /*w*/, buf->extent[1] /*h*/, buf->host,
+            buf->extent[0] * buf->extent[1] * buf->extent[2] * buf->elem_size /* byte size */,
+            buf->extent[0] * buf->extent[2] /* stride */);
+    } else {
+        debug(user_context) << "staring Allocation3DRead(w=" << buf->extent[0] 
+            << " h=" << buf->extent[1]
+            << " d=" << buf->extent[2]
+            << " buf->host=" << buf->host
+            << " bytes=" << buf->extent[0] * buf->extent[1] * buf->extent[2] * buf->elem_size
+            << " stride=" << (buf->extent[0] * buf->elem_size) << "...\n";
+
+        // per rsdAllocationRead3D in frameworks/rs/driver/rsdAllocation.cpp
+        // data has to be planar layout.
+        Context::dispatch->Allocation3DRead(
+            ctx.mContext, (void *)halide_get_device_handle(buf->dev), 0 /*xoff*/,
+            0 /*yoff*/, 0 /*zoff*/, 0 /*mSelectedLOD*/, buf->extent[0] /* w */,
+            buf->extent[1] /*h*/, buf->extent[2] /*d*/, buf->host,
+            buf->extent[0] * buf->extent[1] * buf->extent[2] * buf->elem_size /* byte size */,
+            buf->extent[0] * buf->elem_size /* target buffer one line stride */);
+
+        debug(user_context) << "Allocation3DRead done\n";
+    }
+
+    Context::dispatch->AllocationSyncAll(
+        ctx.mContext, (void *)halide_get_device_handle(buf->dev),
+        RS_ALLOCATION_USAGE_SCRIPT);
+
+    debug(user_context) << "AllocationSyncAll done\n";
 
     Context::dispatch->ContextFinish(ctx.mContext);
 
@@ -1092,47 +1138,6 @@ WEAK int halide_rs_run(void *user_context, void *state_ptr,
         }
         num_args++;
     }
-
-    // // Input constraints.
-    // int32_t input_extentX = *((int32_t *)args[0]);
-    // Context::dispatch->ScriptSetVarV(ctx.mContext, module, 0, &input_extentX,
-    //                                  sizeof(input_extentX));
-    // int32_t input_extentY = *((int32_t *)args[1]);
-    // Context::dispatch->ScriptSetVarV(ctx.mContext, module, 1, &input_extentY,
-    //                                  sizeof(input_extentY));
-    // int32_t input_minX = *((int32_t *)args[2]);
-    // Context::dispatch->ScriptSetVarV(ctx.mContext, module, 2, &input_minX,
-    //                                  sizeof(input_minX));
-    // int32_t input_minY = *((int32_t *)args[3]);
-    // Context::dispatch->ScriptSetVarV(ctx.mContext, module, 3, &input_minY,
-    //                                  sizeof(input_minY));
-    // debug(user_context) << "RS: input(extentX,extentY,minX,minY)="
-    //                     << input_extentX << ", " << input_extentY << ", "
-    //                     << input_minX << ", " << input_minY << ")\n";
-    // int32_t result_extentX = *((int32_t *)args[4]);
-    // Context::dispatch->ScriptSetVarV(ctx.mContext, module, 4,
-    // &result_extentX,
-    //                                  sizeof(result_extentX));
-    // int32_t result_extentY = *((int32_t *)args[5]);
-    // Context::dispatch->ScriptSetVarV(ctx.mContext, module, 5,
-    // &result_extentY,
-    //                                  sizeof(result_extentY));
-    // int32_t result_minX = *((int32_t *)args[6]);
-    // Context::dispatch->ScriptSetVarV(ctx.mContext, module, 6, &result_minX,
-    //                                  sizeof(result_minX));
-    // int32_t result_minY = *((int32_t *)args[7]);
-    // Context::dispatch->ScriptSetVarV(ctx.mContext, module, 7, &result_minY,
-    //                                  sizeof(result_minY));
-    // debug(user_context) << "RS: result(extentX,extentY,minX,minY)="
-    //                     << result_extentX << ", " << result_extentY << ", "
-    //                     << result_minX << ", " << result_minY << ")\n";
-
-    // Context::dispatch->ScriptSetVarObj(
-    //     ctx.mContext, module, 8, (void
-    //     *)halide_get_device_handle(input_arg));
-    // Context::dispatch->ScriptSetVarObj(
-    //     ctx.mContext, module, 9, (void
-    //     *)halide_get_device_handle(output_arg));
 
     debug(user_context) << "RS: halide_rs_run starting now with " << module
                         << " script "
