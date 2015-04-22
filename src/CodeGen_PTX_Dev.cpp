@@ -303,15 +303,10 @@ vector<char> CodeGen_PTX_Dev::compile_to_src() {
     #if LLVM_VERSION < 33
     Options.JITExceptionHandling = false;
     #endif
-<<<<<<< HEAD
-    // Options.JITEmitDebugInfo = false;
-    // Options.JITEmitDebugInfoToDisk = false;
-=======
     #if LLVM_VERSION < 37
     Options.JITEmitDebugInfo = false;
     Options.JITEmitDebugInfoToDisk = false;
     #endif
->>>>>>> master
     Options.GuaranteedTailCallOpt = false;
     Options.StackAlignmentOverride = 0;
     // Options.DisableJumpTables = false;
